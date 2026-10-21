@@ -210,6 +210,14 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
     // are Legal, f80 is custom lowered.
     setOperationAction(ISD::SINT_TO_FP,        MVT::i64, Custom);
     setOperationAction(ISD::STRICT_SINT_TO_FP, MVT::i64, Custom);
+    // A bf16 result is soft promoted via f32, which double rounds integer
+    // sources wider than 24 significant bits. Mark these Custom so that we
+    // can promote via f64 instead, which converts sources of up to 53 bits
+    // exactly, leaving f64->bf16 as the only rounding step.
+    setOperationAction(ISD::SINT_TO_FP,        MVT::bf16, Custom);
+    setOperationAction(ISD::STRICT_SINT_TO_FP, MVT::bf16, Custom);
+    setOperationAction(ISD::UINT_TO_FP,        MVT::bf16, Custom);
+    setOperationAction(ISD::STRICT_UINT_TO_FP, MVT::bf16, Custom);
 
     // Promote i8 FP_TO_SINT to larger FP_TO_SINTS's, as X86 doesn't have
     // this operation.
@@ -36170,6 +36178,35 @@ void X86TargetLowering::ReplaceNodeResults(SDNode *N,
     bool IsSigned = Opc == ISD::SINT_TO_FP || Opc == ISD::STRICT_SINT_TO_FP;
     EVT VT = N->getValueType(0);
     SDValue Src = N->getOperand(IsStrict ? 1 : 0);
+    if (VT == MVT::bf16) {
+      // A scalar bf16 result is soft promoted via f32, which double rounds
+      // integer sources with more than 24 significant bits (i32 -> f32 ->
+      // bf16). Promote through f64 instead; it converts sources of up to 53
+      // significant bits exactly, so f64 -> bf16 becomes the only rounding
+      // step. Wider sources are left on the default f32 path (FIXME: they
+      // may still double round).
+      unsigned MaxWidth =
+          IsSigned ? DAG.ComputeMaxSignificantBits(Src)
+                   : DAG.computeKnownBits(Src).countMaxActiveBits();
+      if (MaxWidth > 24 && MaxWidth <= 53) {
+        if (IsStrict) {
+          SDValue Cvt = DAG.getNode(Opc, dl, {MVT::f64, MVT::Other},
+                                    {N->getOperand(0), Src});
+          SDValue Round =
+              DAG.getNode(ISD::STRICT_FP_ROUND, dl, {MVT::bf16, MVT::Other},
+                          {Cvt.getValue(1), Cvt,
+                           DAG.getIntPtrConstant(0, dl, /*isTarget=*/true)});
+          Results.push_back(Round);
+          Results.push_back(Round.getValue(1));
+        } else {
+          SDValue Cvt = DAG.getNode(Opc, dl, MVT::f64, Src);
+          Results.push_back(DAG.getNode(
+              ISD::FP_ROUND, dl, MVT::bf16, Cvt,
+              DAG.getIntPtrConstant(0, dl, /*isTarget=*/true)));
+        }
+      }
+      return;
+    }
     if (VT.getVectorElementType() == MVT::f16 && Subtarget.hasFP16() &&
         Subtarget.hasVLX()) {
       if (Src.getValueType().getVectorElementType() == MVT::i16)

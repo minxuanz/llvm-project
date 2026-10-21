@@ -176,6 +176,45 @@ declare double @llvm.experimental.constrained.fpext.f64.bf16(bfloat, metadata)
 declare float @llvm.experimental.constrained.fadd.f32(float, float, metadata, metadata)
 declare bfloat @llvm.experimental.constrained.fptrunc.bf16.f32(float, metadata, metadata)
 declare bfloat @llvm.experimental.constrained.fptrunc.bf16.f64(double, metadata, metadata)
+declare bfloat @llvm.experimental.constrained.sitofp.bf16.i32(i32, metadata, metadata)
+
+; i32 -> bf16 goes through f64, which converts i32 exactly, so that
+; f64 -> bf16 is the only rounding step. Rounding through f32 instead
+; double rounds sources wider than 24 significant bits.
+define bfloat @int_to_bfloat(i32 %0) strictfp {
+; X86-LABEL: int_to_bfloat:
+; X86:       # %bb.0:
+; X86-NEXT:    subl $28, %esp
+; X86-NEXT:    .cfi_def_cfa_offset 32
+; X86-NEXT:    movl 32(%esp), %eax
+; X86-NEXT:    movl %eax, 24(%esp)
+; X86-NEXT:    fildl 24(%esp)
+; X86-NEXT:    fstpl (%esp)
+; X86-NEXT:    wait
+; X86-NEXT:    calll __truncdfbf2
+; X86-NEXT:    # kill: def $ax killed $ax def $eax
+; X86-NEXT:    shll $16, %eax
+; X86-NEXT:    movl %eax, 20(%esp)
+; X86-NEXT:    flds 20(%esp)
+; X86-NEXT:    wait
+; X86-NEXT:    addl $28, %esp
+; X86-NEXT:    .cfi_def_cfa_offset 4
+; X86-NEXT:    retl
+;
+; X64-LABEL: int_to_bfloat:
+; X64:       # %bb.0:
+; X64-NEXT:    pushq %rax
+; X64-NEXT:    .cfi_def_cfa_offset 16
+; X64-NEXT:    vcvtsi2sd %edi, %xmm15, %xmm0
+; X64-NEXT:    callq __truncdfbf2@PLT
+; X64-NEXT:    # kill: def $ax killed $ax def $eax
+; X64-NEXT:    vpinsrw $0, %eax, %xmm0, %xmm0
+; X64-NEXT:    popq %rax
+; X64-NEXT:    .cfi_def_cfa_offset 8
+; X64-NEXT:    retq
+  %2 = tail call bfloat @llvm.experimental.constrained.sitofp.bf16.i32(i32 %0, metadata !"round.tonearest", metadata !"fpexcept.strict") #0
+  ret bfloat %2
+}
 
 attributes #0 = { strictfp }
 
